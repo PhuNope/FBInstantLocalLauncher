@@ -1,0 +1,35 @@
+name: Windows test build
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev, main]
+permissions:
+  contents: read
+jobs:
+  windows-test:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          arch: 'win64_msvc2022_64'
+          cache: true
+      - name: Configure
+        shell: pwsh
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" -DLAUNCHER_GITHUB_REPO="$env:GITHUB_REPOSITORY"
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+      - name: Package portable test build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build/Release/FBInstantLocalLauncher.exe dist/
+          Copy-Item scripts/updater.ps1 dist/
+          & "$env:QT_ROOT_DIR/bin/windeployqt.exe" --release --no-translations --compiler-runtime dist/FBInstantLocalLauncher.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FBInstantLocalLauncher-windows-x64-test
+          path: dist/
+          retention-days: 14
