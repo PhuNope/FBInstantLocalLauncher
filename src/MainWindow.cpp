@@ -29,6 +29,8 @@
 #include <QTimer>
 #include <QSslSocket>
 #include <QSslError>
+#include <QTcpServer>
+#include <QHostAddress>
 #include <QCoreApplication>
 #include <QInputDialog>
 #include <QSettings>
@@ -262,6 +264,21 @@ void MainWindow::playGame() {
         QMessageBox::warning(this,"Missing game files","Folder must contain index.html, cert.pem and key.pem. Create a local HTTPS certificate (see README)."); return;
     }
     if (server_->state() != QProcess::NotRunning && (activePath_ != path || activePort_ != port)) stopServer();
+    if (server_->state() == QProcess::NotRunning) {
+        QTcpServer portProbe;
+        if (!portProbe.listen(QHostAddress::LocalHost, static_cast<quint16>(port))) {
+            QMessageBox::warning(this, "HTTPS port already in use",
+                QString("127.0.0.1:%1 is already occupied. Another server (possibly one left from a previous Launcher session) is running.\\n\\n"
+                        "Close that server or choose another port in Edit Game.\\n\\n"
+                        "To identify the process in PowerShell:\\n"
+                        "Get-NetTCPConnection -LocalPort %1 -State Listen | Select-Object OwningProcess\\n"
+                        "Then: Get-Process -Id <PID>\\n\\n"
+                        "Launcher will not stop an unknown process automatically.").arg(port));
+            status_->setText(QString("Port %1 is occupied; HTTPS server was not started.").arg(port));
+            return;
+        }
+        portProbe.close();
+    }
     if (server_->state() == QProcess::NotRunning) {
         serverDiagnostics_.clear();
 #ifdef Q_OS_WIN
