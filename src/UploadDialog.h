@@ -31,5 +31,6 @@ private:
     QPushButton *uploadButton_=nullptr;
     QNetworkAccessManager network_;
     QPointer<QNetworkReply> currentReply_;
+    bool packaging_ = false;
     std::unique_ptr<QTemporaryDir> temporary_;
 };
