@@ -292,6 +292,11 @@ void UploadDialog::beginUpload() {
 }
 
 void UploadDialog::uploadPreparedBundle(const QString& zip) {
+    const QString token = tokenInput_->text().trimmed();
+    if (token.isEmpty()) {
+        QMessageBox::warning(this, "Missing token", "Provide an Asset Upload Access Token.");
+        return;
+    }
     QString validationError;
     if (!validateZip(zip, validationError)) {
         QMessageBox::warning(this, "Invalid bundle", validationError);
