@@ -25,6 +25,8 @@
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
+#include <QtConcurrent/QtConcurrent>
+#include <QFutureWatcher>
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <wincred.h>
@@ -197,19 +199,18 @@ try {
     return runPowerShell(script, file, error);
 }
 
-QString UploadDialog::prepareZip() {
-    if (existing_->isChecked()) return zipPath_->text().trimmed();
-    const QDir build(buildPath_);
+static QString packageDirectory(const QString& buildPath, const QString& tempPath, QString& error) {
+    const QDir build(buildPath);
     if (!QFileInfo(build.filePath("index.html")).isFile() ||
         !QFileInfo(build.filePath("fbapp-config.json")).isFile()) {
-        status_->setText("Build folder must contain index.html and fbapp-config.json.");
+        error = "Build folder must contain index.html and fbapp-config.json.";
         return {};
     }
     temporary_ = std::make_unique<QTemporaryDir>();
     if (!temporary_->isValid()) { status_->setText("Cannot create temporary directory."); return {}; }
-    const QString stage = QDir(temporary_->path()).filePath("bundle");
+    const QString stage = QDir(tempPath).filePath("bundle");
     QDir().mkpath(stage);
-    QDirIterator iterator(buildPath_, QDir::Files | QDir::NoSymLinks | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
+    QDirIterator iterator(buildPath, QDir::Files | QDir::NoSymLinks | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
     while (iterator.hasNext()) {
         const QString source = iterator.next();
         const QString relative = build.relativeFilePath(source).replace('\\', '/');
@@ -218,18 +219,17 @@ QString UploadDialog::prepareZip() {
             name.endsWith(".zip") || relative.startsWith("../")) continue;
         const QString target = QDir(stage).filePath(relative);
         if (!QDir().mkpath(QFileInfo(target).absolutePath()) || !QFile::copy(source, target)) {
-            status_->setText("Cannot stage: " + relative);
+            error = "Cannot stage: " + relative;
             return {};
         }
     }
-    const QString zip = QDir(temporary_->path()).filePath("bundle.zip");
-    QString error;
+    const QString zip = QDir(tempPath).filePath("bundle.zip");
     const QString script = QString::fromLatin1(R"PS(
 $ErrorActionPreference='Stop'
 Compress-Archive -Path (Join-Path $env:FBIL_STAGE_PATH '*') -DestinationPath $env:FBIL_ZIP_PATH -Force
 )PS");
     if (!runPowerShell(script, zip, error, stage)) {
-        status_->setText("ZIP creation failed: " + error);
+        error = "ZIP creation failed: " + error;
         return {};
     }
     return zip;
@@ -245,8 +245,48 @@ void UploadDialog::beginUpload() {
     }
     const QString token = tokenInput_->text().trimmed();
     if (token.isEmpty()) { QMessageBox::warning(this,"Missing token","Provide an Asset Upload Access Token."); return; }
-    const QString zip = prepareZip();
-    if (zip.isEmpty()) return;
+    if (pack_->isChecked()) {
+        const QDir build(buildPath_);
+        if (!QFileInfo(build.filePath("index.html")).isFile() ||
+            !QFileInfo(build.filePath("fbapp-config.json")).isFile()) {
+            status_->setText("Build folder must contain index.html and fbapp-config.json.");
+            return;
+        }
+        temporary_ = std::make_unique<QTemporaryDir>();
+        if (!temporary_->isValid()) {
+            status_->setText("Cannot create temporary directory.");
+            return;
+        }
+        setBusy(true);
+        progress_->setRange(0, 0);
+        status_->setText("Packaging build directory... UI remains responsive.");
+        const QString sourceDir = buildPath_;
+        const QString tmpDir = temporary_->path();
+        auto* watcher = new QFutureWatcher<QPair<QString, QString>>(this);
+        connect(watcher, &QFutureWatcher<QPair<QString, QString>>::finished, this,
+            [this, watcher] {
+                const auto result = watcher->result();
+                watcher->deleteLater();
+                progress_->setRange(0, 100);
+                progress_->setValue(0);
+                setBusy(false);
+                if (result.first.isEmpty()) {
+                    status_->setText("Packaging failed: " + result.second);
+                    return;
+                }
+                uploadPreparedBundle(result.first);
+            });
+        watcher->setFuture(QtConcurrent::run([sourceDir, tmpDir] {
+            QString error;
+            QString zip = packageDirectory(sourceDir, tmpDir, error);
+            return qMakePair(zip, error);
+        }));
+        return;
+    }
+    uploadPreparedBundle(zipPath_->text().trimmed());
+}
+
+void UploadDialog::uploadPreparedBundle(const QString& zip) {
     QString validationError;
     if (!validateZip(zip, validationError)) {
         QMessageBox::warning(this, "Invalid bundle", validationError);
