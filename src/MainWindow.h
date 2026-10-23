@@ -3,6 +3,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QProcess>
+#include <QUrl>
 #include <QNetworkAccessManager>
 class QTableWidget;
 class QLabel;
@@ -26,7 +27,7 @@ private:
     QString activePath_;
     int activePort_ = -1;
     QTimer* serverReadyTimer_ = nullptr;
-    QUrl* pendingUrl_ = nullptr;
+    QUrl pendingUrl_;
     int readinessAttempts_ = 0;
     QString serverDiagnostics_;
     void load();
