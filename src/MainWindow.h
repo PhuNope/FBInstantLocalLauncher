@@ -10,6 +10,7 @@ class QPushButton;
 class QLineEdit;
 class QSpinBox;
 class QUrl;
+class QTimer;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -24,6 +25,10 @@ private:
     QProcess* server_ = nullptr;
     QString activePath_;
     int activePort_ = -1;
+    QTimer* serverReadyTimer_ = nullptr;
+    QUrl* pendingUrl_ = nullptr;
+    int readinessAttempts_ = 0;
+    QString serverDiagnostics_;
     void load();
     void save();
     void refresh();
