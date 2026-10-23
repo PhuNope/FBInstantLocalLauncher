@@ -90,7 +90,19 @@ UploadDialog::UploadDialog(const QString& gameName, const QString& appId, const 
     tokenInput_->setEchoMode(QLineEdit::Password);
     tokenInput_->setPlaceholderText("Meta Instant Games Asset Upload Access Token");
     tokenInput_->setText(readToken());
-    form->addRow("Upload token", tokenInput_);
+    auto* tokenRow = new QWidget(this);
+    auto* tokenLayout = new QHBoxLayout(tokenRow);
+    tokenLayout->setContentsMargins(0, 0, 0, 0);
+    tokenLayout->addWidget(tokenInput_, 1);
+    auto* toggleToken = new QPushButton("Show", tokenRow);
+    toggleToken->setCheckable(true);
+    toggleToken->setToolTip("Show or hide the locally saved upload token");
+    tokenLayout->addWidget(toggleToken);
+    connect(toggleToken, &QPushButton::toggled, this, [this, toggleToken](bool visible) {
+        tokenInput_->setEchoMode(visible ? QLineEdit::Normal : QLineEdit::Password);
+        toggleToken->setText(visible ? "Hide" : "Show");
+    });
+    form->addRow("Upload token", tokenRow);
     commentInput_ = new QLineEdit("Uploaded via FBInstantLocalLauncher");
     form->addRow("Comment", commentInput_);
     layout->addLayout(form);
