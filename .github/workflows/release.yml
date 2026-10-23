@@ -1,8 +1,8 @@
 name: Windows release
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
@@ -19,19 +19,14 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
-      - name: Resolve and verify release tag on main
+      - name: Resolve version
         shell: pwsh
-        env:
-          RELEASE_INPUT_TAG: ${{ inputs.tag }}
         run: |
-          $tag = if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') { $env:RELEASE_INPUT_TAG } else { $env:GITHUB_REF_NAME }
-          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw "Invalid release tag: $tag" }
-          git fetch origin main --tags
-          git rev-parse "refs/tags/$tag" | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "Tag not found: $tag" }
-          $tagCommit = (git rev-list -n 1 "refs/tags/$tag").Trim()
-          git merge-base --is-ancestor $tagCommit origin/main
-          if ($LASTEXITCODE -ne 0) { throw 'Release tag must point to a commit on main' }
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $tag = $env:GITHUB_REF_NAME } else {
+            $cmake = Get-Content CMakeLists.txt -Raw
+            if ($cmake -notmatch 'project\(FBInstantLocalLauncher VERSION ([0-9]+\.[0-9]+\.[0-9]+)') { throw 'Version not found' }
+            $tag = 'v' + $Matches[1]
+          }
           "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
@@ -55,6 +50,15 @@ jobs:
       - name: Zip package
         shell: pwsh
         run: Compress-Archive -Path dist/* -DestinationPath "FBInstantLocalLauncher-$env:RELEASE_TAG-windows-x64.zip"
+      - name: Create release tag after successful build
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: |
+          git fetch origin --tags
+          git rev-parse "refs/tags/$env:RELEASE_TAG" *> $null
+          if ($LASTEXITCODE -eq 0) { throw 'Release tag already exists' }
+          git tag "$env:RELEASE_TAG" "$env:GITHUB_SHA"
+          git push origin "refs/tags/$env:RELEASE_TAG"
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -65,5 +69,5 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             gh release upload "$env:RELEASE_TAG" "$asset" --clobber
           } else {
-            gh release create "$env:RELEASE_TAG" "$asset" --title "$env:RELEASE_TAG" --generate-notes
+            gh release create "$env:RELEASE_TAG" "$asset" --title "$env:RELEASE_TAG" --notes-file RELEASE_NOTES.md
           }
