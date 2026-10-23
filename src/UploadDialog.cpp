@@ -16,6 +16,8 @@
 #include <QMessageBox>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QUrlQuery>
+#include <QDialogButtonBox>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRadioButton>
@@ -104,6 +106,9 @@ UploadDialog::UploadDialog(const QString& gameName, const QString& appId, const 
         tokenInput_->setEchoMode(visible ? QLineEdit::Normal : QLineEdit::Password);
         toggleToken->setText(visible ? "Hide" : "Show");
     });
+    auto* getToken = new QPushButton("Get App Token", tokenRow);
+    tokenLayout->addWidget(getToken);
+    connect(getToken, &QPushButton::clicked, this, &UploadDialog::getAppAccessToken);
     form->addRow("Upload token", tokenRow);
     commentInput_ = new QLineEdit("Uploaded via FBInstantLocalLauncher");
     form->addRow("Comment", commentInput_);
@@ -173,6 +178,59 @@ bool UploadDialog::storeToken(const QString& token) {
     return false;
 #endif
 }
+
+void UploadDialog::getAppAccessToken() {
+    QDialog dialog(this);
+    dialog.setWindowTitle("Get Meta App Access Token");
+    dialog.setStyleSheet(styleSheet());
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* note = new QLabel("Enter the App Secret from Meta App Settings > Basic.\\n"
+        "The secret will not be saved. App token upload permission is not guaranteed.", &dialog);
+    note->setWordWrap(true);
+    layout->addWidget(note);
+    auto* form = new QFormLayout;
+    auto* id = new QLineEdit(appId_, &dialog);
+    id->setReadOnly(true);
+    auto* secret = new QLineEdit(&dialog);
+    secret->setEchoMode(QLineEdit::Password);
+    form->addRow("App ID", id);
+    form->addRow("App Secret", secret);
+    layout->addLayout(form);
+    auto* controls = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addWidget(controls);
+    connect(controls, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(controls, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) return;
+    QString secretValue = secret->text().trimmed();
+    secret->clear();
+    if (secretValue.isEmpty()) {
+        QMessageBox::warning(this, "Missing App Secret", "Enter App Secret.");
+        return;
+    }
+    QUrlQuery body;
+    body.addQueryItem("client_id", appId_);
+    body.addQueryItem("client_secret", secretValue);
+    body.addQueryItem("grant_type", "client_credentials");
+    secretValue.fill(QChar(' '));
+    QNetworkRequest request(QUrl("https://graph.facebook.com/oauth/access_token"));
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+    request.setTransferTimeout(20000);
+    auto* reply = network_.post(request, body.query(QUrl::FullyEncoded).toUtf8());
+    status_->setText("Requesting App Access Token from Meta...");
+    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+        const QJsonObject response = QJsonDocument::fromJson(reply->readAll()).object();
+        const QString token = response.value("access_token").toString();
+        if (reply->error() == QNetworkReply::NoError && !token.isEmpty()) {
+            tokenInput_->setText(token);
+            status_->setText("App Access Token retrieved. Save it explicitly to persist it. Upload permission is not guaranteed.");
+        } else {
+            const QString error = response.value("error").toObject().value("message").toString();
+            status_->setText("Get token failed: " + (error.isEmpty() ? reply->errorString() : error).left(500));
+        }
+        reply->deleteLater();
+    });
+}
+
 void UploadDialog::saveToken() {
     if (tokenInput_->text().trimmed().isEmpty()) {
         QMessageBox::warning(this, "Missing token", "Enter your Asset Upload Access Token.");
