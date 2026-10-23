@@ -268,11 +268,11 @@ void MainWindow::playGame() {
         QTcpServer portProbe;
         if (!portProbe.listen(QHostAddress::LocalHost, static_cast<quint16>(port))) {
             QMessageBox::warning(this, "HTTPS port already in use",
-                QString("127.0.0.1:%1 is already occupied. Another server (possibly one left from a previous Launcher session) is running.\\n\\n"
-                        "Close that server or choose another port in Edit Game.\\n\\n"
-                        "To identify the process in PowerShell:\\n"
-                        "Get-NetTCPConnection -LocalPort %1 -State Listen | Select-Object OwningProcess\\n"
-                        "Then: Get-Process -Id <PID>\\n\\n"
+                QString("127.0.0.1:%1 is already occupied. Another server (possibly one left from a previous Launcher session) is running.\n\n"
+                        "Close that server or choose another port in Edit Game.\n\n"
+                        "To identify the process in PowerShell:\n"
+                        "Get-NetTCPConnection -LocalPort %1 -State Listen | Select-Object OwningProcess\n"
+                        "Then: Get-Process -Id <PID>\n\n"
                         "Launcher will not stop an unknown process automatically.").arg(port));
             status_->setText(QString("Port %1 is occupied; HTTPS server was not started.").arg(port));
             return;
