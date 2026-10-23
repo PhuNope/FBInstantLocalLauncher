@@ -132,6 +132,11 @@ UploadDialog::UploadDialog(const QString& gameName, const QString& appId, const 
     });
 }
 
+void UploadDialog::reject() {
+    if (packaging_) return;
+    QDialog::reject();
+}
+
 void UploadDialog::chooseZip() {
     const QString file = QFileDialog::getOpenFileName(this, "Choose Instant Games bundle", buildPath_, "ZIP archives (*.zip)");
     if (!file.isEmpty()) zipPath_->setText(file);
