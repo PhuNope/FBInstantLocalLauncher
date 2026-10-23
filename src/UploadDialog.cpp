@@ -206,8 +206,6 @@ static QString packageDirectory(const QString& buildPath, const QString& tempPat
         error = "Build folder must contain index.html and fbapp-config.json.";
         return {};
     }
-    temporary_ = std::make_unique<QTemporaryDir>();
-    if (!temporary_->isValid()) { status_->setText("Cannot create temporary directory."); return {}; }
     const QString stage = QDir(tempPath).filePath("bundle");
     QDir().mkpath(stage);
     QDirIterator iterator(buildPath, QDir::Files | QDir::NoSymLinks | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
