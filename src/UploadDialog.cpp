@@ -431,9 +431,9 @@ void UploadDialog::uploadPreparedBundle(const QString& zip) {
             if (graphSubcode) details += QString(", subcode %1").arg(graphSubcode);
             if (!graphType.isEmpty()) details += ", " + graphType;
             details += ": " + reason.left(500);
-            if (!traceId.isEmpty()) details += "\\nMeta trace ID: " + traceId.left(120);
+            if (!traceId.isEmpty()) details += "\nMeta trace ID: " + traceId.left(120);
             if (httpStatus == 400 && (graphCode == 200 || reason.contains("permission", Qt::CaseInsensitive)))
-                details += "\\nCheck that the credential is an Asset Upload Access Token with hosting permissions, not merely an App Access Token.";
+                details += "\nCheck that the credential is an Asset Upload Access Token with hosting permissions, not merely an App Access Token.";
             status_->setText(details);
             QMessageBox::warning(this, "Meta upload failed", details);
         }
