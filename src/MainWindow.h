@@ -34,6 +34,7 @@ private:
     void playGame();
     void stopServer();
     void openDataFile();
+    void showDependencies();
     void configureUpdates();
     void checkForUpdates(bool manual = false);
     void downloadUpdate(const QString& tag, const QUrl& assetUrl);
