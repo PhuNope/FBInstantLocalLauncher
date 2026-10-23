@@ -131,7 +131,10 @@ UploadDialog::UploadDialog(const QString& gameName, const QString& appId, const 
     layout->addLayout(buttons);
     connect(uploadButton_, &QPushButton::clicked, this, &UploadDialog::beginUpload);
     connect(close, &QPushButton::clicked, this, [this] {
-        if (packaging_) return;
+        if (packaging_) {
+            status_->setText("Packaging in progress. Close will be available when ZIP is ready.");
+            return;
+        }
         if (currentReply_) currentReply_->abort();
         reject();
     });
@@ -332,6 +335,7 @@ void UploadDialog::beginUpload() {
                 watcher->deleteLater();
                 progress_->setRange(0, 100);
                 progress_->setValue(0);
+                packaging_ = false;
                 setBusy(false);
                 if (result.first.isEmpty()) {
                     status_->setText("Packaging failed: " + result.second);
@@ -435,7 +439,9 @@ void UploadDialog::uploadPreparedBundle(const QString& zip) {
             if (httpStatus == 400 && (graphCode == 200 || reason.contains("permission", Qt::CaseInsensitive)))
                 details += "\nCheck that the credential is an Asset Upload Access Token with hosting permissions, not merely an App Access Token.";
             status_->setText(details);
-            QMessageBox::warning(this, "Meta upload failed", details);
+            // Keep the dialog actionable after API failures: a modal warning can
+            // appear frozen, and the status label already contains all details.
+            progress_->setValue(0);
         }
         reply->deleteLater();
     });
