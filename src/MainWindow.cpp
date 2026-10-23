@@ -27,6 +27,8 @@
 #include <QRegularExpression>
 #include <QProcessEnvironment>
 #include <QTimer>
+#include <QSslSocket>
+#include <QSslError>
 #include <QCoreApplication>
 #include <QInputDialog>
 #include <QSettings>
@@ -118,14 +120,43 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), server_(new QProc
             status_->setText("Unable to start http-server. Install Node.js + npm, then run: npm install -g http-server");
     });
     connect(server_, qOverload<int,QProcess::ExitStatus>(&QProcess::finished), this, [this](int code, QProcess::ExitStatus){
+        serverReadyTimer_->stop(); pendingUrl_ = QUrl();
+        serverDiagnostics_ += QString::fromLocal8Bit(server_->readAllStandardError());
         activePath_.clear(); activePort_ = -1;
-        status_->setText(QString("Local HTTPS server stopped (exit code %1)").arg(code));
+        status_->setText(QString("Local HTTPS server stopped (exit code %1). %2").arg(code).arg(serverDiagnostics_.right(900)));
         stopButton_->setEnabled(false);
     });
+    connect(server_, &QProcess::readyReadStandardOutput, this, [this] { serverDiagnostics_ += QString::fromLocal8Bit(server_->readAllStandardOutput()); });
     connect(server_, &QProcess::readyReadStandardError, this, [this] {
         const QString log = QString::fromLocal8Bit(server_->readAllStandardError());
+        serverDiagnostics_ += log;
         if (log.contains("EADDRINUSE", Qt::CaseInsensitive))
             status_->setText("Port already in use. Change the game's port or stop the other server.");
+    });
+    serverReadyTimer_ = new QTimer(this);
+    serverReadyTimer_->setInterval(300);
+    connect(serverReadyTimer_, &QTimer::timeout, this, [this] {
+        if (pendingUrl_.isEmpty()) { serverReadyTimer_->stop(); return; }
+        if (server_->state() == QProcess::NotRunning || ++readinessAttempts_ > 40) {
+            serverReadyTimer_->stop();
+            pendingUrl_ = QUrl();
+            status_->setText("HTTPS startup failed or timed out. " + serverDiagnostics_.right(900));
+            return;
+        }
+        auto* probe = new QSslSocket(this);
+        connect(probe, &QSslSocket::sslErrors, probe, [probe](const QList<QSslError>&) { probe->ignoreSslErrors(); });
+        connect(probe, &QSslSocket::encrypted, this, [this, probe] {
+            probe->deleteLater();
+            if (pendingUrl_.isEmpty()) return;
+            serverReadyTimer_->stop();
+            QUrl url = pendingUrl_;
+            pendingUrl_ = QUrl();
+            status_->setText("HTTPS ready. Opening Facebook Player.");
+            QDesktopServices::openUrl(url);
+        });
+        connect(probe, &QSslSocket::errorOccurred, probe, [probe](QAbstractSocket::SocketError) { probe->deleteLater(); });
+        probe->connectToHostEncrypted("127.0.0.1", static_cast<quint16>(activePort_));
+        QTimer::singleShot(250, probe, [probe] { probe->abort(); probe->deleteLater(); });
     });
     load(); refresh();
     QTimer::singleShot(650, this, [this]{ checkForUpdates(false); });
@@ -212,6 +243,7 @@ void MainWindow::removeGame() {
 }
 
 void MainWindow::stopServer() {
+    serverReadyTimer_->stop(); pendingUrl_ = QUrl();
     if(server_->state()==QProcess::NotRunning) return;
     server_->terminate();
     if(!server_->waitForFinished(1500)) { server_->kill(); server_->waitForFinished(1500); }
@@ -231,6 +263,7 @@ void MainWindow::playGame() {
     }
     if (server_->state() != QProcess::NotRunning && (activePath_ != path || activePort_ != port)) stopServer();
     if (server_->state() == QProcess::NotRunning) {
+        serverDiagnostics_.clear();
 #ifdef Q_OS_WIN
         server_->setProgram("cmd.exe");
         server_->setArguments({"/C", "http-server", "-S", "-C", "cert.pem", "-K", "key.pem", "-p", QString::number(port), "-a", "127.0.0.1", "-c-1", "."});
@@ -248,8 +281,10 @@ void MainWindow::playGame() {
     stopButton_->setEnabled(true);
     QUrl url(QString("https://www.facebook.com/embed/instantgames/%1/player").arg(id));
     QUrlQuery query; query.addQueryItem("game_url",QString("https://localhost:%1").arg(port)); url.setQuery(query);
-    status_->setText("HTTPS process started. Opening: " + url.toDisplayString());
-    QDesktopServices::openUrl(url);
+    pendingUrl_ = url;
+    readinessAttempts_ = 0;
+    status_->setText("Waiting for HTTPS server to become ready...");
+    serverReadyTimer_->start();
 }
 
 namespace {
