@@ -249,7 +249,7 @@ void MainWindow::stopServer() {
     if(server_->state()==QProcess::NotRunning) return;
     server_->terminate();
     if(!server_->waitForFinished(1500)) { server_->kill(); server_->waitForFinished(1500); }
-    activePath_.clear(); activePort_=-1;
+    activePath_.clear(); activePort_=-1; activeCertPath_.clear(); activeKeyPath_.clear();
     stopButton_->setEnabled(false);
 }
 
@@ -260,10 +260,47 @@ void MainWindow::playGame() {
     const int port=g.value("port").toInt(8080);
     const QString id=g.value("id").toString();
     const QDir dir(path);
-    if(!QFileInfo(dir.filePath("index.html")).isFile() || !QFileInfo(dir.filePath("key.pem")).isFile() || !QFileInfo(dir.filePath("cert.pem")).isFile()) {
-        QMessageBox::warning(this,"Missing game files","Folder must contain index.html, cert.pem and key.pem. Create a local HTTPS certificate (see README)."); return;
+    if (!QFileInfo(dir.filePath("index.html")).isFile()) {
+        QMessageBox::warning(this, "Missing game files", "Game folder must contain index.html.");
+        return;
     }
-    if (server_->state() != QProcess::NotRunning && (activePath_ != path || activePort_ != port)) stopServer();
+    QString certPath = dir.filePath("cert.pem");
+    QString keyPath = dir.filePath("key.pem");
+    const bool gameCert = QFileInfo::exists(certPath);
+    const bool gameKey = QFileInfo::exists(keyPath);
+    if (gameCert != gameKey) {
+        QMessageBox::warning(this, "Incomplete certificate",
+            "Game folder has only one of cert.pem and key.pem. Add the matching file or remove the incomplete pair to use the shared certificate.");
+        return;
+    }
+    if (!gameCert) {
+        const QString sharedDir = QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).filePath("certificates");
+        QDir().mkpath(sharedDir);
+        certPath = QDir(sharedDir).filePath("cert.pem");
+        keyPath = QDir(sharedDir).filePath("key.pem");
+        if (!QFileInfo::exists(certPath) || !QFileInfo::exists(keyPath)) {
+#ifdef Q_OS_WIN
+            if (QMessageBox::question(this, "Create localhost certificate",
+                "No game-specific or shared TLS certificate found. Generate a shared localhost certificate using mkcert?\\n"
+                "This requires mkcert installed and its local CA trusted via 'mkcert -install'.") != QMessageBox::Yes) return;
+            QProcess generate;
+            generate.setProgram("cmd.exe");
+            generate.setArguments({"/D", "/S", "/C", "mkcert -cert-file \"" + certPath + "\" -key-file \"" + keyPath + "\" localhost 127.0.0.1 ::1"});
+            generate.start();
+            if (!generate.waitForStarted(3000) || !generate.waitForFinished(20000) || generate.exitCode() != 0 ||
+                !QFileInfo::exists(certPath) || !QFileInfo::exists(keyPath)) {
+                QMessageBox::warning(this, "Certificate creation failed",
+                    "Install mkcert in Dependencies, run 'mkcert -install' once, and retry.\\n" +
+                    QString::fromLocal8Bit(generate.readAllStandardError()));
+                return;
+            }
+#else
+            QMessageBox::warning(this, "Missing certificate", "Generate a shared certificate with mkcert.");
+            return;
+#endif
+        }
+    }
+    if (server_->state() != QProcess::NotRunning && (activePath_ != path || activePort_ != port || activeCertPath_ != certPath || activeKeyPath_ != keyPath)) stopServer();
     if (server_->state() == QProcess::NotRunning) {
         QTcpServer portProbe;
         if (!portProbe.listen(QHostAddress::LocalHost, static_cast<quint16>(port))) {
@@ -283,17 +320,17 @@ void MainWindow::playGame() {
         serverDiagnostics_.clear();
 #ifdef Q_OS_WIN
         server_->setProgram("cmd.exe");
-        server_->setArguments({"/C", "http-server", "-S", "-C", "cert.pem", "-K", "key.pem", "-p", QString::number(port), "-a", "127.0.0.1", "-c-1", "."});
+        server_->setArguments({"/C", "http-server", "-S", "-C", certPath, "-K", keyPath, "-p", QString::number(port), "-a", "127.0.0.1", "-c-1", "."});
 #else
         server_->setProgram("http-server");
-        server_->setArguments({"-S", "-C", "cert.pem", "-K", "key.pem", "-p", QString::number(port), "-a", "127.0.0.1", "-c-1", "."});
+        server_->setArguments({"-S", "-C", certPath, "-K", keyPath, "-p", QString::number(port), "-a", "127.0.0.1", "-c-1", "."});
 #endif
         server_->setWorkingDirectory(path);
         server_->start();
         if(!server_->waitForStarted(4000)) {
             QMessageBox::critical(this,"Could not start server", "Check that Node.js and npm http-server are installed and available on PATH.\n" + server_->errorString());return;
         }
-        activePath_=path; activePort_=port;
+        activePath_=path; activePort_=port; activeCertPath_=certPath; activeKeyPath_=keyPath;
     }
     stopButton_->setEnabled(true);
     QUrl url(QString("https://www.facebook.com/embed/instantgames/%1/player").arg(id));
