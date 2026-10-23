@@ -19,6 +19,7 @@ protected:
 private:
     void chooseZip();
     void saveToken();
+    void getAppAccessToken();
     void beginUpload();
     void setBusy(bool busy);
     QString readToken() const;
