@@ -30,6 +30,8 @@ private:
     QUrl pendingUrl_;
     int readinessAttempts_ = 0;
     QString serverDiagnostics_;
+    QString activeCertPath_;
+    QString activeKeyPath_;
     void load();
     void save();
     void refresh();
