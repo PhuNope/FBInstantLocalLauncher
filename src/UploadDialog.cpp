@@ -181,7 +181,8 @@ bool UploadDialog::validateZip(const QString& file, QString& error) const {
     const QString script = QString::fromLatin1(R"PS(
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName System.IO.Compression
-$z=[IO.Compression.ZipFile]::OpenRead($env:FBIL_ZIP_PATH)
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$z=[System.IO.Compression.ZipFile]::OpenRead($env:FBIL_ZIP_PATH)
 try {
     $names=@($z.Entries | ForEach-Object { $_.FullName.Replace('\','/') })
     if ($names -notcontains 'index.html') { throw 'index.html must be at archive root' }
