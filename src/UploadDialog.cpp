@@ -126,6 +126,7 @@ UploadDialog::UploadDialog(const QString& gameName, const QString& appId, const 
     layout->addLayout(buttons);
     connect(uploadButton_, &QPushButton::clicked, this, &UploadDialog::beginUpload);
     connect(close, &QPushButton::clicked, this, [this] {
+        if (packaging_) return;
         if (currentReply_) currentReply_->abort();
         reject();
     });
@@ -255,6 +256,7 @@ void UploadDialog::beginUpload() {
             status_->setText("Cannot create temporary directory.");
             return;
         }
+        packaging_ = true;
         setBusy(true);
         progress_->setRange(0, 0);
         status_->setText("Packaging build directory... UI remains responsive.");
