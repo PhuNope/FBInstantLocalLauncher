@@ -37,6 +37,7 @@
 #include <QTemporaryDir>
 #include <QCryptographicHash>
 #include <QPointer>
+#include <QVector>
 #include <memory>
 
 static const char* kStyles = R"(
@@ -81,6 +82,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), server_(new QProc
     makeButton("▶ Play", [this]{ playGame(); });
     stopButton_ = makeButton("■ Stop server", [this]{ stopServer(); });
     makeButton("Open data folder", [this]{ openDataFile(); });
+    makeButton("Dependencies", [this]{ showDependencies(); });
     makeButton("Updates settings", [this]{ configureUpdates(); });
     makeButton("Check updates", [this]{ checkForUpdates(true); });
     controls->addStretch();
@@ -97,7 +99,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), server_(new QProc
     table_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     table_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     table_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
-    connect(table_, &QTableWidget::cellDoubleClicked, this, [this](int, int){ playGame(); });
+    connect(table_, &QTableWidget::cellDoubleClicked, this, [this](int row, int column) {
+        if (column == 2 && row >= 0 && row < games_.size()) {
+            const QString path = games_.at(row).toObject().value("path").toString();
+            if (QDir(path).exists()) QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+            else QMessageBox::warning(this, "Folder missing", "Game directory not found: " + path);
+        } else {
+            playGame();
+        }
+    });
     layout->addWidget(table_, 1);
     status_ = new QLabel("Ready");
     status_->setWordWrap(true);
@@ -241,6 +251,96 @@ void MainWindow::playGame() {
     status_->setText("HTTPS process started. Opening: " + url.toDisplayString());
     QDesktopServices::openUrl(url);
 }
+
+namespace {
+struct Dependency {
+    const char* name;
+    const char* executable;
+    QStringList checkArgs;
+    const char* installCommand;
+    const char* purpose;
+};
+QVector<Dependency> dependencyList() {
+    return {
+        {"Node.js", "node", {"--version"}, "winget install --id OpenJS.NodeJS.LTS -e --accept-package-agreements --accept-source-agreements", "Required runtime"},
+        {"npm", "npm", {"--version"}, "winget install --id OpenJS.NodeJS.LTS -e --accept-package-agreements --accept-source-agreements", "Node package manager"},
+        {"http-server", "http-server", {"--version"}, "npm install -g http-server", "Required HTTPS server"},
+        {"mkcert", "mkcert", {"-version"}, "winget install --id FiloSottile.mkcert -e --accept-package-agreements --accept-source-agreements", "Optional: trusted SSL certificates"}
+    };
+}
+bool dependencyAvailable(const Dependency& dep, QString& version) {
+    QProcess process;
+#ifdef Q_OS_WIN
+    process.setProgram("cmd.exe");
+    QString command = QString::fromLatin1(dep.executable);
+    for (const auto& arg : dep.checkArgs) command += " " + arg;
+    process.setArguments({"/D", "/S", "/C", command});
+#else
+    process.setProgram(QString::fromLatin1(dep.executable));
+    process.setArguments(dep.checkArgs);
+#endif
+    process.start();
+    if (!process.waitForStarted(2000)) return false;
+    if (!process.waitForFinished(4000)) { process.kill(); process.waitForFinished(500); return false; }
+    version = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
+    if (version.isEmpty()) version = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
+    return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
+}
+}
+
+void MainWindow::showDependencies() {
+    QDialog dialog(this);
+    dialog.setWindowTitle("Dependencies");
+    dialog.resize(760, 390);
+    dialog.setStyleSheet(kStyles);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* intro = new QLabel("Required: Node.js, npm, http-server. Optional: mkcert for browser-trusted localhost certificates.");
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+    auto* table = new QTableWidget(&dialog);
+    table->setColumnCount(4);
+    table->setHorizontalHeaderLabels({"Library", "Status", "Purpose", "Action"});
+    table->verticalHeader()->hide();
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    auto deps = dependencyList();
+    table->setRowCount(deps.size());
+    const auto refresh = [table, deps]() {
+        for (int i = 0; i < deps.size(); ++i) {
+            QString version;
+            bool installed = dependencyAvailable(deps.at(i), version);
+            table->setItem(i, 0, new QTableWidgetItem(QString::fromLatin1(deps.at(i).name)));
+            table->setItem(i, 1, new QTableWidgetItem(installed ? "Installed: " + version.left(40) : "Missing / PATH"));
+            table->setItem(i, 2, new QTableWidgetItem(QString::fromLatin1(deps.at(i).purpose)));
+            auto* button = new QPushButton(installed ? "Reinstall" : "Install");
+            table->setCellWidget(i, 3, button);
+            QObject::connect(button, &QPushButton::clicked, table, [dep=deps.at(i), table]() {
+                const QString command = QString::fromLatin1(dep.installCommand);
+                if (QMessageBox::question(table, "Install dependency", "Run the following command in PowerShell?\n\n" + command) != QMessageBox::Yes) return;
+#ifdef Q_OS_WIN
+                if (!QProcess::startDetached("powershell.exe", {"-NoLogo", "-NoProfile", "-NoExit", "-Command", command}))
+                    QMessageBox::warning(table, "Failed to start", "Open PowerShell and run:\n" + command);
+#else
+                QMessageBox::information(table, "Windows only", "Quick install requires Windows.\n" + command);
+#endif
+            });
+        }
+        table->resizeRowsToContents();
+    };
+    layout->addWidget(table);
+    auto* actions = new QHBoxLayout;
+    auto* refreshButton = new QPushButton("Refresh checks");
+    auto* closeButton = new QPushButton("Close");
+    actions->addWidget(refreshButton);
+    actions->addStretch();
+    actions->addWidget(closeButton);
+    layout->addLayout(actions);
+    connect(refreshButton, &QPushButton::clicked, &dialog, refresh);
+    connect(closeButton, &QPushButton::clicked, &dialog, &QDialog::accept);
+    refresh();
+    dialog.exec();
+}
+
 void MainWindow::openDataFile() {
     QDir().mkpath(QFileInfo(dataFile()).absolutePath());
     QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(dataFile()).absolutePath()));
