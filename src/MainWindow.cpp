@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "UploadDialog.h"
 #include <QCheckBox>
 #include <QDesktopServices>
 #include <QDialog>
@@ -85,6 +86,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), server_(new QProc
     makeButton("Edit", [this]{ editGame(); });
     makeButton("Delete", [this]{ removeGame(); });
     makeButton("▶ Play", [this]{ playGame(); });
+    makeButton("Upload FB", [this]{
+        const int i = selectedIndex();
+        if (i < 0) { QMessageBox::information(this, "Select a game", "Select a game before uploading."); return; }
+        const QJsonObject g = games_.at(i).toObject();
+        UploadDialog dialog(g.value("name").toString(), g.value("id").toString(), g.value("path").toString(), this);
+        dialog.exec();
+    });
     stopButton_ = makeButton("■ Stop server", [this]{ stopServer(); });
     makeButton("Open data folder", [this]{ openDataFile(); });
     makeButton("Dependencies", [this]{ showDependencies(); });
