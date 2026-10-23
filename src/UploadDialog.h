@@ -21,7 +21,7 @@ private:
     void setBusy(bool busy);
     QString readToken() const;
     bool storeToken(const QString& token);
-    QString prepareZip();
+    void uploadPreparedBundle(const QString& zip);
     bool validateZip(const QString& file, QString& error) const;
     QString gameName_, appId_, buildPath_;
     QLineEdit *zipPath_=nullptr, *tokenInput_=nullptr, *commentInput_=nullptr;
