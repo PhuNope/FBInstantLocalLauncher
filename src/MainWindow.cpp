@@ -31,6 +31,7 @@
 #include <QSslError>
 #include <QTcpServer>
 #include <QHostAddress>
+#include <QProcessEnvironment>
 #include <QCoreApplication>
 #include <QInputDialog>
 #include <QSettings>
@@ -324,8 +325,23 @@ void MainWindow::playGame() {
     if (server_->state() == QProcess::NotRunning) {
         serverDiagnostics_.clear();
 #ifdef Q_OS_WIN
-        server_->setProgram("cmd.exe");
-        server_->setArguments({"/C", "http-server", "-S", "-C", certPath, "-K", keyPath, "-p", QString::number(port), "-a", "127.0.0.1", "-c-1", "."});
+        // Launch Node directly: cmd.exe /C http-server leaves node.exe orphaned
+        // when the parent shell is terminated on Windows.
+        const QString nodeExe = QStandardPaths::findExecutable("node.exe");
+        QProcess npm;
+        npm.start("cmd.exe", {"/D", "/C", "npm root -g"});
+        if (nodeExe.isEmpty() || !npm.waitForStarted(3000) || !npm.waitForFinished(5000) || npm.exitCode() != 0) {
+            QMessageBox::warning(this, "Missing Node.js", "Install Node.js and http-server using Dependencies, then restart Launcher.");
+            return;
+        }
+        const QString globalModules = QString::fromLocal8Bit(npm.readAllStandardOutput()).trimmed().split('\n').last().trimmed();
+        const QString serverEntry = QDir(globalModules).filePath("http-server/bin/http-server");
+        if (!QFileInfo::isFile(serverEntry)) {
+            QMessageBox::warning(this, "Missing http-server", "Cannot find global http-server package. Run: npm install -g http-server");
+            return;
+        }
+        server_->setProgram(nodeExe);
+        server_->setArguments({serverEntry, "-S", "-C", certPath, "-K", keyPath, "-p", QString::number(port), "-a", "127.0.0.1", "-c-1", "."});
 #else
         server_->setProgram("http-server");
         server_->setArguments({"-S", "-C", certPath, "-K", keyPath, "-p", QString::number(port), "-a", "127.0.0.1", "-c-1", "."});
