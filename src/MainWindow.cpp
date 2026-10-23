@@ -194,7 +194,12 @@ void MainWindow::refresh() {
     for(int i=0; i<games_.size(); ++i) {
         const QJsonObject g = games_.at(i).toObject();
         const QString cert = QDir(g.value("path").toString()).filePath("cert.pem");
-        const QStringList cells = {g.value("name").toString(),g.value("id").toString(),g.value("path").toString(),QString::number(g.value("port").toInt(8080)),QFileInfo::exists(cert)?"Found":"Missing"};
+        const QString sharedCert = QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).filePath("certificates/cert.pem");
+        const QString sharedKey = QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).filePath("certificates/key.pem");
+        const bool gamePair = QFileInfo::exists(cert) && QFileInfo::exists(QDir(g.value("path").toString()).filePath("key.pem"));
+        const bool sharedPair = QFileInfo::exists(sharedCert) && QFileInfo::exists(sharedKey);
+        const QString certStatus = gamePair ? "Game" : (QFileInfo::exists(cert) ? "Incomplete" : (sharedPair ? "Shared" : "Not configured"));
+        const QStringList cells = {g.value("name").toString(),g.value("id").toString(),g.value("path").toString(),QString::number(g.value("port").toInt(8080)),certStatus};
         for (int col=0;col<cells.size();++col) table_->setItem(i,col,new QTableWidgetItem(cells.at(col)));
     }
     stopButton_->setEnabled(server_->state() != QProcess::NotRunning);
