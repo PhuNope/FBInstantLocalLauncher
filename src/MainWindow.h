@@ -3,6 +3,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QProcess>
+#include <QUrl>
 #include <QNetworkAccessManager>
 class QTableWidget;
 class QLabel;
@@ -10,6 +11,7 @@ class QPushButton;
 class QLineEdit;
 class QSpinBox;
 class QUrl;
+class QTimer;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -24,6 +26,12 @@ private:
     QProcess* server_ = nullptr;
     QString activePath_;
     int activePort_ = -1;
+    QTimer* serverReadyTimer_ = nullptr;
+    QUrl pendingUrl_;
+    int readinessAttempts_ = 0;
+    QString serverDiagnostics_;
+    QString activeCertPath_;
+    QString activeKeyPath_;
     void load();
     void save();
     void refresh();
@@ -34,6 +42,7 @@ private:
     void playGame();
     void stopServer();
     void openDataFile();
+    void showDependencies();
     void configureUpdates();
     void checkForUpdates(bool manual = false);
     void downloadUpdate(const QString& tag, const QUrl& assetUrl);

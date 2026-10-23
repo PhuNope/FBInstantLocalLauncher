@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "UploadDialog.h"
 #include <QCheckBox>
 #include <QDesktopServices>
 #include <QDialog>
@@ -27,6 +28,11 @@
 #include <QRegularExpression>
 #include <QProcessEnvironment>
 #include <QTimer>
+#include <QSslSocket>
+#include <QSslError>
+#include <QTcpServer>
+#include <QHostAddress>
+#include <QProcessEnvironment>
 #include <QCoreApplication>
 #include <QInputDialog>
 #include <QSettings>
@@ -37,6 +43,7 @@
 #include <QTemporaryDir>
 #include <QCryptographicHash>
 #include <QPointer>
+#include <QVector>
 #include <memory>
 
 static const char* kStyles = R"(
@@ -79,8 +86,29 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), server_(new QProc
     makeButton("Edit", [this]{ editGame(); });
     makeButton("Delete", [this]{ removeGame(); });
     makeButton("▶ Play", [this]{ playGame(); });
+    makeButton("Upload FB", [this]{
+        const int i = selectedIndex();
+        if (i < 0) { QMessageBox::information(this, "Select a game", "Select a game before uploading."); return; }
+        const QJsonObject g = games_.at(i).toObject();
+        UploadDialog dialog(g.value("name").toString(), g.value("id").toString(), g.value("path").toString(), this);
+        dialog.exec();
+    });
+    makeButton("Facebook Dashboard", [this] {
+        const int i = selectedIndex();
+        if (i < 0) {
+            QMessageBox::information(this, "Select a game", "Select a game to open its Facebook dashboard.");
+            return;
+        }
+        const QString appId = games_.at(i).toObject().value("id").toString();
+        if (!QRegularExpression("^[0-9]+$").match(appId).hasMatch()) {
+            QMessageBox::warning(this, "Invalid App ID", "Selected game has no valid numeric Facebook App ID.");
+            return;
+        }
+        QDesktopServices::openUrl(QUrl("https://developers.facebook.com/apps/" + appId + "/"));
+    });
     stopButton_ = makeButton("■ Stop server", [this]{ stopServer(); });
     makeButton("Open data folder", [this]{ openDataFile(); });
+    makeButton("Dependencies", [this]{ showDependencies(); });
     makeButton("Updates settings", [this]{ configureUpdates(); });
     makeButton("Check updates", [this]{ checkForUpdates(true); });
     controls->addStretch();
@@ -97,7 +125,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), server_(new QProc
     table_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     table_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     table_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
-    connect(table_, &QTableWidget::cellDoubleClicked, this, [this](int, int){ playGame(); });
+    connect(table_, &QTableWidget::cellDoubleClicked, this, [this](int row, int column) {
+        if (column == 2 && row >= 0 && row < games_.size()) {
+            const QString path = games_.at(row).toObject().value("path").toString();
+            if (QDir(path).exists()) QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+            else QMessageBox::warning(this, "Folder missing", "Game directory not found: " + path);
+        } else {
+            playGame();
+        }
+    });
     layout->addWidget(table_, 1);
     status_ = new QLabel("Ready");
     status_->setWordWrap(true);
@@ -108,14 +144,43 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), server_(new QProc
             status_->setText("Unable to start http-server. Install Node.js + npm, then run: npm install -g http-server");
     });
     connect(server_, qOverload<int,QProcess::ExitStatus>(&QProcess::finished), this, [this](int code, QProcess::ExitStatus){
+        serverReadyTimer_->stop(); pendingUrl_ = QUrl();
+        serverDiagnostics_ += QString::fromLocal8Bit(server_->readAllStandardError());
         activePath_.clear(); activePort_ = -1;
-        status_->setText(QString("Local HTTPS server stopped (exit code %1)").arg(code));
+        status_->setText(QString("Local HTTPS server stopped (exit code %1). %2").arg(code).arg(serverDiagnostics_.right(900)));
         stopButton_->setEnabled(false);
     });
+    connect(server_, &QProcess::readyReadStandardOutput, this, [this] { serverDiagnostics_ += QString::fromLocal8Bit(server_->readAllStandardOutput()); });
     connect(server_, &QProcess::readyReadStandardError, this, [this] {
         const QString log = QString::fromLocal8Bit(server_->readAllStandardError());
+        serverDiagnostics_ += log;
         if (log.contains("EADDRINUSE", Qt::CaseInsensitive))
             status_->setText("Port already in use. Change the game's port or stop the other server.");
+    });
+    serverReadyTimer_ = new QTimer(this);
+    serverReadyTimer_->setInterval(300);
+    connect(serverReadyTimer_, &QTimer::timeout, this, [this] {
+        if (pendingUrl_.isEmpty()) { serverReadyTimer_->stop(); return; }
+        if (server_->state() == QProcess::NotRunning || ++readinessAttempts_ > 40) {
+            serverReadyTimer_->stop();
+            pendingUrl_ = QUrl();
+            status_->setText("HTTPS startup failed or timed out. " + serverDiagnostics_.right(900));
+            return;
+        }
+        auto* probe = new QSslSocket(this);
+        connect(probe, &QSslSocket::sslErrors, probe, [probe](const QList<QSslError>&) { probe->ignoreSslErrors(); });
+        connect(probe, &QSslSocket::encrypted, this, [this, probe] {
+            probe->deleteLater();
+            if (pendingUrl_.isEmpty()) return;
+            serverReadyTimer_->stop();
+            QUrl url = pendingUrl_;
+            pendingUrl_ = QUrl();
+            status_->setText("HTTPS ready. Opening Facebook Player.");
+            QDesktopServices::openUrl(url);
+        });
+        connect(probe, &QSslSocket::errorOccurred, probe, [probe](QAbstractSocket::SocketError) { probe->deleteLater(); });
+        probe->connectToHostEncrypted("127.0.0.1", static_cast<quint16>(activePort_));
+        QTimer::singleShot(250, probe, [probe] { probe->abort(); probe->deleteLater(); });
     });
     load(); refresh();
     QTimer::singleShot(650, this, [this]{ checkForUpdates(false); });
@@ -151,7 +216,12 @@ void MainWindow::refresh() {
     for(int i=0; i<games_.size(); ++i) {
         const QJsonObject g = games_.at(i).toObject();
         const QString cert = QDir(g.value("path").toString()).filePath("cert.pem");
-        const QStringList cells = {g.value("name").toString(),g.value("id").toString(),g.value("path").toString(),QString::number(g.value("port").toInt(8080)),QFileInfo::exists(cert)?"Found":"Missing"};
+        const QString sharedCert = QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).filePath("certificates/cert.pem");
+        const QString sharedKey = QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).filePath("certificates/key.pem");
+        const bool gamePair = QFileInfo::exists(cert) && QFileInfo::exists(QDir(g.value("path").toString()).filePath("key.pem"));
+        const bool sharedPair = QFileInfo::exists(sharedCert) && QFileInfo::exists(sharedKey);
+        const QString certStatus = gamePair ? "Game" : (QFileInfo::exists(cert) ? "Incomplete" : (sharedPair ? "Shared" : "Not configured"));
+        const QStringList cells = {g.value("name").toString(),g.value("id").toString(),g.value("path").toString(),QString::number(g.value("port").toInt(8080)),certStatus};
         for (int col=0;col<cells.size();++col) table_->setItem(i,col,new QTableWidgetItem(cells.at(col)));
     }
     stopButton_->setEnabled(server_->state() != QProcess::NotRunning);
@@ -202,10 +272,11 @@ void MainWindow::removeGame() {
 }
 
 void MainWindow::stopServer() {
+    serverReadyTimer_->stop(); pendingUrl_ = QUrl();
     if(server_->state()==QProcess::NotRunning) return;
     server_->terminate();
     if(!server_->waitForFinished(1500)) { server_->kill(); server_->waitForFinished(1500); }
-    activePath_.clear(); activePort_=-1;
+    activePath_.clear(); activePort_=-1; activeCertPath_.clear(); activeKeyPath_.clear();
     stopButton_->setEnabled(false);
 }
 
@@ -216,31 +287,191 @@ void MainWindow::playGame() {
     const int port=g.value("port").toInt(8080);
     const QString id=g.value("id").toString();
     const QDir dir(path);
-    if(!QFileInfo(dir.filePath("index.html")).isFile() || !QFileInfo(dir.filePath("key.pem")).isFile() || !QFileInfo(dir.filePath("cert.pem")).isFile()) {
-        QMessageBox::warning(this,"Missing game files","Folder must contain index.html, cert.pem and key.pem. Create a local HTTPS certificate (see README)."); return;
+    if (!QFileInfo(dir.filePath("index.html")).isFile()) {
+        QMessageBox::warning(this, "Missing game files", "Game folder must contain index.html.");
+        return;
     }
-    if (server_->state() != QProcess::NotRunning && (activePath_ != path || activePort_ != port)) stopServer();
-    if (server_->state() == QProcess::NotRunning) {
+    QString certPath = dir.filePath("cert.pem");
+    QString keyPath = dir.filePath("key.pem");
+    const bool gameCert = QFileInfo::exists(certPath);
+    const bool gameKey = QFileInfo::exists(keyPath);
+    if (gameCert != gameKey) {
+        QMessageBox::warning(this, "Incomplete certificate",
+            "Game folder has only one of cert.pem and key.pem. Add the matching file or remove the incomplete pair to use the shared certificate.");
+        return;
+    }
+    if (!gameCert) {
+        const QString sharedDir = QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).filePath("certificates");
+        QDir().mkpath(sharedDir);
+        certPath = QDir(sharedDir).filePath("cert.pem");
+        keyPath = QDir(sharedDir).filePath("key.pem");
+        if (!QFileInfo::exists(certPath) || !QFileInfo::exists(keyPath)) {
 #ifdef Q_OS_WIN
-        server_->setProgram("cmd.exe");
-        server_->setArguments({"/C", "http-server", "-S", "-C", "cert.pem", "-K", "key.pem", "-p", QString::number(port), "-a", "127.0.0.1", "-c-1", "."});
+            if (QMessageBox::question(this, "Create localhost certificate",
+                "No game-specific or shared TLS certificate found. Generate a shared localhost certificate using mkcert?\\n"
+                "This requires mkcert installed and its local CA trusted via 'mkcert -install'.") != QMessageBox::Yes) return;
+            QProcess generate;
+            generate.setProgram("cmd.exe");
+            generate.setArguments({"/D", "/S", "/C", "mkcert -cert-file \"" + certPath + "\" -key-file \"" + keyPath + "\" localhost 127.0.0.1 ::1"});
+            generate.start();
+            if (!generate.waitForStarted(3000) || !generate.waitForFinished(20000) || generate.exitCode() != 0 ||
+                !QFileInfo::exists(certPath) || !QFileInfo::exists(keyPath)) {
+                QMessageBox::warning(this, "Certificate creation failed",
+                    "Install mkcert in Dependencies, run 'mkcert -install' once, and retry.\\n" +
+                    QString::fromLocal8Bit(generate.readAllStandardError()));
+                return;
+            }
+#else
+            QMessageBox::warning(this, "Missing certificate", "Generate a shared certificate with mkcert.");
+            return;
+#endif
+        }
+    }
+    if (server_->state() != QProcess::NotRunning && (activePath_ != path || activePort_ != port || activeCertPath_ != certPath || activeKeyPath_ != keyPath)) stopServer();
+    if (server_->state() == QProcess::NotRunning) {
+        QTcpServer portProbe;
+        if (!portProbe.listen(QHostAddress::LocalHost, static_cast<quint16>(port))) {
+            QMessageBox::warning(this, "HTTPS port already in use",
+                QString("127.0.0.1:%1 is already occupied. Another server (possibly one left from a previous Launcher session) is running.\n\n"
+                        "Close that server or choose another port in Edit Game.\n\n"
+                        "To identify the process in PowerShell:\n"
+                        "Get-NetTCPConnection -LocalPort %1 -State Listen | Select-Object OwningProcess\n"
+                        "Then: Get-Process -Id <PID>\n\n"
+                        "Launcher will not stop an unknown process automatically.").arg(port));
+            status_->setText(QString("Port %1 is occupied; HTTPS server was not started.").arg(port));
+            return;
+        }
+        portProbe.close();
+    }
+    if (server_->state() == QProcess::NotRunning) {
+        serverDiagnostics_.clear();
+#ifdef Q_OS_WIN
+        // Launch Node directly: cmd.exe /C http-server leaves node.exe orphaned
+        // when the parent shell is terminated on Windows.
+        const QString nodeExe = QStandardPaths::findExecutable("node.exe");
+        QProcess npm;
+        npm.start("cmd.exe", {"/D", "/C", "npm root -g"});
+        if (nodeExe.isEmpty() || !npm.waitForStarted(3000) || !npm.waitForFinished(5000) || npm.exitCode() != 0) {
+            QMessageBox::warning(this, "Missing Node.js", "Install Node.js and http-server using Dependencies, then restart Launcher.");
+            return;
+        }
+        const QString globalModules = QString::fromLocal8Bit(npm.readAllStandardOutput()).trimmed().split('\n').last().trimmed();
+        const QString serverEntry = QDir(globalModules).filePath("http-server/bin/http-server");
+        if (!QFileInfo(serverEntry).isFile()) {
+            QMessageBox::warning(this, "Missing http-server", "Cannot find global http-server package. Run: npm install -g http-server");
+            return;
+        }
+        server_->setProgram(nodeExe);
+        server_->setArguments({serverEntry, "-S", "-C", certPath, "-K", keyPath, "-p", QString::number(port), "-a", "127.0.0.1", "-c-1", "."});
 #else
         server_->setProgram("http-server");
-        server_->setArguments({"-S", "-C", "cert.pem", "-K", "key.pem", "-p", QString::number(port), "-a", "127.0.0.1", "-c-1", "."});
+        server_->setArguments({"-S", "-C", certPath, "-K", keyPath, "-p", QString::number(port), "-a", "127.0.0.1", "-c-1", "."});
 #endif
         server_->setWorkingDirectory(path);
         server_->start();
         if(!server_->waitForStarted(4000)) {
             QMessageBox::critical(this,"Could not start server", "Check that Node.js and npm http-server are installed and available on PATH.\n" + server_->errorString());return;
         }
-        activePath_=path; activePort_=port;
+        activePath_=path; activePort_=port; activeCertPath_=certPath; activeKeyPath_=keyPath;
     }
     stopButton_->setEnabled(true);
     QUrl url(QString("https://www.facebook.com/embed/instantgames/%1/player").arg(id));
     QUrlQuery query; query.addQueryItem("game_url",QString("https://localhost:%1").arg(port)); url.setQuery(query);
-    status_->setText("HTTPS process started. Opening: " + url.toDisplayString());
-    QDesktopServices::openUrl(url);
+    pendingUrl_ = url;
+    readinessAttempts_ = 0;
+    status_->setText("Waiting for HTTPS server to become ready...");
+    serverReadyTimer_->start();
 }
+
+namespace {
+struct Dependency {
+    const char* name;
+    const char* executable;
+    QStringList checkArgs;
+    const char* installCommand;
+    const char* purpose;
+};
+QVector<Dependency> dependencyList() {
+    return {
+        {"Node.js", "node", {"--version"}, "winget install --id OpenJS.NodeJS.LTS -e --accept-package-agreements --accept-source-agreements", "Required runtime"},
+        {"npm", "npm", {"--version"}, "winget install --id OpenJS.NodeJS.LTS -e --accept-package-agreements --accept-source-agreements", "Node package manager"},
+        {"http-server", "http-server", {"--version"}, "npm install -g http-server", "Required HTTPS server"},
+        {"mkcert", "mkcert", {"-version"}, "winget install --id FiloSottile.mkcert -e --accept-package-agreements --accept-source-agreements", "Optional: trusted SSL certificates"}
+    };
+}
+bool dependencyAvailable(const Dependency& dep, QString& version) {
+    QProcess process;
+#ifdef Q_OS_WIN
+    process.setProgram("cmd.exe");
+    QString command = QString::fromLatin1(dep.executable);
+    for (const auto& arg : dep.checkArgs) command += " " + arg;
+    process.setArguments({"/D", "/S", "/C", command});
+#else
+    process.setProgram(QString::fromLatin1(dep.executable));
+    process.setArguments(dep.checkArgs);
+#endif
+    process.start();
+    if (!process.waitForStarted(2000)) return false;
+    if (!process.waitForFinished(4000)) { process.kill(); process.waitForFinished(500); return false; }
+    version = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
+    if (version.isEmpty()) version = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
+    return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
+}
+}
+
+void MainWindow::showDependencies() {
+    QDialog dialog(this);
+    dialog.setWindowTitle("Dependencies");
+    dialog.resize(760, 390);
+    dialog.setStyleSheet(kStyles);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* intro = new QLabel("Required: Node.js, npm, http-server. Optional: mkcert for browser-trusted localhost certificates.");
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+    auto* table = new QTableWidget(&dialog);
+    table->setColumnCount(4);
+    table->setHorizontalHeaderLabels({"Library", "Status", "Purpose", "Action"});
+    table->verticalHeader()->hide();
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    auto deps = dependencyList();
+    table->setRowCount(deps.size());
+    const auto refresh = [table, deps]() {
+        for (int i = 0; i < deps.size(); ++i) {
+            QString version;
+            bool installed = dependencyAvailable(deps.at(i), version);
+            table->setItem(i, 0, new QTableWidgetItem(QString::fromLatin1(deps.at(i).name)));
+            table->setItem(i, 1, new QTableWidgetItem(installed ? "Installed: " + version.left(40) : "Missing / PATH"));
+            table->setItem(i, 2, new QTableWidgetItem(QString::fromLatin1(deps.at(i).purpose)));
+            auto* button = new QPushButton(installed ? "Reinstall" : "Install");
+            table->setCellWidget(i, 3, button);
+            QObject::connect(button, &QPushButton::clicked, table, [dep=deps.at(i), table]() {
+                const QString command = QString::fromLatin1(dep.installCommand);
+                if (QMessageBox::question(table, "Install dependency", "Run the following command in PowerShell?\n\n" + command) != QMessageBox::Yes) return;
+#ifdef Q_OS_WIN
+                if (!QProcess::startDetached("powershell.exe", {"-NoLogo", "-NoProfile", "-NoExit", "-Command", command}))
+                    QMessageBox::warning(table, "Failed to start", "Open PowerShell and run:\n" + command);
+#else
+                QMessageBox::information(table, "Windows only", "Quick install requires Windows.\n" + command);
+#endif
+            });
+        }
+        table->resizeRowsToContents();
+    };
+    layout->addWidget(table);
+    auto* actions = new QHBoxLayout;
+    auto* refreshButton = new QPushButton("Refresh checks");
+    auto* closeButton = new QPushButton("Close");
+    actions->addWidget(refreshButton);
+    actions->addStretch();
+    actions->addWidget(closeButton);
+    layout->addLayout(actions);
+    connect(refreshButton, &QPushButton::clicked, &dialog, refresh);
+    connect(closeButton, &QPushButton::clicked, &dialog, &QDialog::accept);
+    refresh();
+    dialog.exec();
+}
+
 void MainWindow::openDataFile() {
     QDir().mkpath(QFileInfo(dataFile()).absolutePath());
     QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(dataFile()).absolutePath()));

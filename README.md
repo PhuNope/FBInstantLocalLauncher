@@ -102,3 +102,14 @@ Workflow checks that tag commit is reachable from `origin/main` and builds an x6
 ### Test builds on every push
 
 `.github/workflows/windows-test.yml` builds Windows x64 on pushes to `dev` or `main`, or manual **Actions → Windows test build → Run workflow**. Download artifact `FBInstantLocalLauncher-windows-x64-test` from that workflow run; it includes `FBInstantLocalLauncher.exe`, updater script, and Qt dependencies. These builds do **not** create a Release.
+
+
+## Meta Web Hosting upload (dev v1.2.0)
+
+Select a game and click **Upload FB**. Choose an existing Cocos ZIP or package the build directory into a new ZIP. Both paths validate that the ZIP root includes \`index.html\` and \`fbapp-config.json\`. The auto-packager excludes \`cert.pem\`, \`key.pem\`, \`*.key\`, and existing ZIP files. Existing ZIPs containing those private files are rejected.
+
+Obtain a game-specific **Asset Upload Access Token** from Meta Instant Games → Web Hosting. The Upload dialog stores the token through **Windows Credential Manager** under \`FBInstantLocalLauncher/MetaUpload/<AppID>\`; it is not written to \`games.json\` or Git. This is a machine/user-local secret. To revoke access, rotate the token in Meta and delete the credential through Windows Credential Manager.
+
+The upload uses the Meta bundle-assets multipart endpoint. Uploading does **not** publish to Production. Check the hosting dashboard for processing/Standby and publish separately if desired. API behavior, token permissions, and product availability may vary with Meta's current platform. Do a small test upload before production use.
+
+Packaging currently uses Windows PowerShell's \`Compress-Archive\`; use an existing Cocos ZIP for especially large packages, or if archival limitations arise. Never upload a private key.
