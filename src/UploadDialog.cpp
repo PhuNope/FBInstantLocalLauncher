@@ -120,7 +120,7 @@ UploadDialog::UploadDialog(const QString& gameName, const QString& appId, const 
     progress_->setRange(0, 100);
     progress_->setValue(0);
     layout->addWidget(progress_);
-    status_ = new QLabel("Ready. Bundle must contain index.html and fbapp-config.json at ZIP root.");
+    status_ = new QLabel("Ready. ZIP contains fb-instant-games/index.html and fb-instant-games/fbapp-config.json.");
     status_->setWordWrap(true);
     layout->addWidget(status_);
     auto* buttons = new QHBoxLayout;
@@ -254,8 +254,8 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $z=[System.IO.Compression.ZipFile]::OpenRead($env:FBIL_ZIP_PATH)
 try {
     $names=@($z.Entries | ForEach-Object { $_.FullName.Replace('\','/') })
-    if ($names -notcontains 'index.html') { throw 'index.html must be at archive root' }
-    if ($names -notcontains 'fbapp-config.json') { throw 'fbapp-config.json must be at archive root' }
+    if ($names -notcontains 'fb-instant-games/index.html') { throw 'Missing fb-instant-games/index.html' }
+    if ($names -notcontains 'fb-instant-games/fbapp-config.json') { throw 'Missing fb-instant-games/fbapp-config.json' }
     foreach ($name in $names) {
         if ($name -match '(^/|(^|/)\.\.(/|$)|^[A-Za-z]:)' -or $name -match '(^|/)(cert\.pem|key\.pem|.*\.key)$') {
             throw "Unsafe or private file in bundle: $name"
@@ -266,14 +266,36 @@ try {
     return runPowerShell(script, file, error);
 }
 
-static QString packageDirectory(const QString& buildPath, const QString& tempPath, QString& error) {
+static QString normalizeZip(const QString& inputZip, const QString& tempPath, QString& error) {
+    const QString outputZip = QDir(tempPath).filePath("normalized.zip");
+    const QString script = QString::fromLatin1(R"PS(
+$ErrorActionPreference='Stop'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$src=[System.IO.Compression.ZipFile]::OpenRead($env:FBIL_STAGE_PATH)
+try {
+    $names=@($src.Entries | ForEach-Object { $_.FullName.Replace('\','/') })
+    if ($names -contains 'fb-instant-games/index.html' -and $names -contains 'fb-instant-games/fbapp-config.json') {
+        $prefix=''
+    } elseif ($names -contains 'index.html' -and $names -contains 'fbapp-config.json') {
+        $prefix='fb-instant-games/'
+    } else {
+        throw 'ZIP must contain index.html and fbapp-config.json at root or in fb-instant-games/'
+    }
+    $dst=[System.IO.Compression.ZipFile]::Open($env:FBIL_ZIP_PATH,[System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($entry in $src.Entries) {
+            $name=$entry.FullName.Replace('\','/')
+            if ($name.EndsWith('/')) { continue }
+            $base=($name -split '/')[-1]
+            if ($base -match '^(cert\.pem|key\.pem|.*\.key)const QString& buildPath, const QString& tempPath, QString& error) {
     const QDir build(buildPath);
     if (!QFileInfo(build.filePath("index.html")).isFile() ||
         !QFileInfo(build.filePath("fbapp-config.json")).isFile()) {
         error = "Build folder must contain index.html and fbapp-config.json.";
         return {};
     }
-    const QString stage = QDir(tempPath).filePath("bundle");
+    const QString stage = QDir(tempPath).filePath("bundle/fb-instant-games");
     QDir().mkpath(stage);
     QDirIterator iterator(buildPath, QDir::Files | QDir::NoSymLinks | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
     while (iterator.hasNext()) {
@@ -291,7 +313,231 @@ static QString packageDirectory(const QString& buildPath, const QString& tempPat
     const QString zip = QDir(tempPath).filePath("bundle.zip");
     const QString script = QString::fromLatin1(R"PS(
 $ErrorActionPreference='Stop'
-Compress-Archive -Path (Join-Path $env:FBIL_STAGE_PATH '*') -DestinationPath $env:FBIL_ZIP_PATH -Force
+Compress-Archive -Path (Join-Path (Split-Path $env:FBIL_STAGE_PATH -Parent) '*') -DestinationPath $env:FBIL_ZIP_PATH -Force
+)PS");
+    if (!runPowerShell(script, zip, error, stage)) {
+        error = "ZIP creation failed: " + error;
+        return {};
+    }
+    return zip;
+}
+void UploadDialog::setBusy(bool busy) {
+    uploadButton_->setEnabled(!busy);
+    existing_->setEnabled(!busy);
+    pack_->setEnabled(!busy);
+}
+void UploadDialog::beginUpload() {
+    if (!QRegularExpression("^[0-9]+$").match(appId_).hasMatch()) {
+        QMessageBox::warning(this, "Invalid ID", "Facebook App ID must be numeric."); return;
+    }
+    const QString token = tokenInput_->text().trimmed();
+    if (token.isEmpty()) { QMessageBox::warning(this,"Missing token","Provide an Asset Upload Access Token."); return; }
+    if (pack_->isChecked()) {
+        const QDir build(buildPath_);
+        if (!QFileInfo(build.filePath("index.html")).isFile() ||
+            !QFileInfo(build.filePath("fbapp-config.json")).isFile()) {
+            status_->setText("Build folder must contain index.html and fbapp-config.json.");
+            return;
+        }
+        temporary_ = std::make_unique<QTemporaryDir>();
+        if (!temporary_->isValid()) {
+            status_->setText("Cannot create temporary directory.");
+            return;
+        }
+        packaging_ = true;
+        setBusy(true);
+        progress_->setRange(0, 0);
+        status_->setText("Packaging build directory... UI remains responsive.");
+        const QString sourceDir = buildPath_;
+        const QString tmpDir = temporary_->path();
+        auto* watcher = new QFutureWatcher<QPair<QString, QString>>(this);
+        connect(watcher, &QFutureWatcher<QPair<QString, QString>>::finished, this,
+            [this, watcher] {
+                const auto result = watcher->result();
+                watcher->deleteLater();
+                progress_->setRange(0, 100);
+                progress_->setValue(0);
+                packaging_ = false;
+                setBusy(false);
+                if (result.first.isEmpty()) {
+                    status_->setText("Packaging failed: " + result.second);
+                    return;
+                }
+                uploadPreparedBundle(result.first);
+            });
+        watcher->setFuture(QtConcurrent::run([sourceDir, tmpDir] {
+            QString error;
+            QString zip = packageDirectory(sourceDir, tmpDir, error);
+            return qMakePair(zip, error);
+        }));
+        return;
+    }
+    const QString sourceZip = zipPath_->text().trimmed();
+    if (!QFileInfo(sourceZip).isFile()) {
+        QMessageBox::warning(this, "Missing ZIP", "Select a ZIP first.");
+        return;
+    }
+    temporary_ = std::make_unique<QTemporaryDir>();
+    if (!temporary_->isValid()) { status_->setText("Cannot create temporary folder."); return; }
+    packaging_ = true;
+    setBusy(true);
+    progress_->setRange(0, 0);
+    status_->setText("Normalizing ZIP to fb-instant-games/... layout...");
+    const QString tempPath = temporary_->path();
+    auto* watcher = new QFutureWatcher<QPair<QString, QString>>(this);
+    connect(watcher, &QFutureWatcher<QPair<QString, QString>>::finished, this, [this, watcher] {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        packaging_ = false;
+        progress_->setRange(0, 100);
+        progress_->setValue(0);
+        setBusy(false);
+        if (result.first.isEmpty()) { status_->setText("ZIP normalization failed: " + result.second); return; }
+        uploadPreparedBundle(result.first);
+    });
+    watcher->setFuture(QtConcurrent::run([sourceZip, tempPath] {
+        QString error;
+        QString output = normalizeZip(sourceZip, tempPath, error);
+        return qMakePair(output, error);
+    }));
+}
+
+void UploadDialog::uploadPreparedBundle(const QString& zip) {
+    const QString token = tokenInput_->text().trimmed();
+    if (token.isEmpty()) {
+        QMessageBox::warning(this, "Missing token", "Provide an Asset Upload Access Token.");
+        return;
+    }
+    QString validationError;
+    if (!validateZip(zip, validationError)) {
+        QMessageBox::warning(this, "Invalid bundle", validationError);
+        return;
+    }
+    const QString confirmation = QString("Upload %1 to Meta Web Hosting for App ID %2?\n\n"
+        "This action will NOT publish to Production.").arg(QFileInfo(zip).fileName(), appId_);
+    if (QMessageBox::question(this, "Confirm upload", confirmation) != QMessageBox::Yes) return;
+    if (!storeToken(token)) {
+        QMessageBox::warning(this, "Credential error", "Token must be stored securely before uploading.");
+        return;
+    }
+    auto* multipart = new QHttpMultiPart(QHttpMultiPart::FormDataType);
+    auto field = [multipart](const QByteArray& name, const QByteArray& value) {
+        QHttpPart p;
+        p.setHeader(QNetworkRequest::ContentDispositionHeader,
+                    QVariant("form-data; name=\"" + QString::fromLatin1(name) + "\""));
+        p.setBody(value);
+        multipart->append(p);
+    };
+    field("access_token", token.toUtf8());
+    field("type", "BUNDLE");
+    field("comment", commentInput_->text().toUtf8());
+    auto* data = new QFile(zip, multipart);
+    if (!data->open(QIODevice::ReadOnly)) {
+        delete multipart;
+        QMessageBox::warning(this, "Read error", "Cannot open ZIP file.");
+        return;
+    }
+    QHttpPart archive;
+    archive.setHeader(QNetworkRequest::ContentDispositionHeader,
+        QVariant("form-data; name=\"asset\"; filename=\"bundle.zip\""));
+    archive.setHeader(QNetworkRequest::ContentTypeHeader, QVariant("application/octet-stream"));
+    archive.setBodyDevice(data);
+    multipart->append(archive);
+    QNetworkRequest request(QUrl("https://graph-video.facebook.com/" + appId_ + "/assets"));
+    request.setRawHeader("Accept", "application/json");
+    request.setTransferTimeout(180000);
+    setBusy(true);
+    status_->setText("Uploading bundle to Meta Web Hosting...");
+    progress_->setValue(0);
+    auto* reply = network_.post(request, multipart);
+    currentReply_ = reply;
+    multipart->setParent(reply);
+    connect(reply, &QNetworkReply::uploadProgress, this, [this](qint64 sent, qint64 total) {
+        if (total > 0) progress_->setValue(static_cast<int>(sent * 100 / total));
+    });
+    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+        const auto body = reply->readAll();
+        const auto parsed = QJsonDocument::fromJson(body).object();
+        const auto failure = parsed.value("error").toObject();
+        const bool ok = reply->error() == QNetworkReply::NoError &&
+                        !parsed.isEmpty() && parsed.value("success").toBool(false);
+        currentReply_ = nullptr;
+        setBusy(false);
+        if (ok) {
+            progress_->setValue(100);
+            status_->setText("Uploaded successfully. Check Web Hosting for processing / Standby. Production unchanged.");
+            QMessageBox::information(this, "Upload completed",
+                "Bundle sent to Meta Web Hosting. Verify status in the Meta dashboard. Production was NOT updated.");
+            QDesktopServices::openUrl(QUrl("https://developers.facebook.com/apps/" + appId_ + "/instant-games/hosting/"));
+        } else {
+            QString reason = failure.value("message").toString();
+            if (reason.isEmpty()) reason = reply->errorString();
+            const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const int graphCode = failure.value("code").toInt();
+            const int graphSubcode = failure.value("error_subcode").toInt();
+            const QString graphType = failure.value("type").toString();
+            QString traceId = failure.value("fbtrace_id").toString();
+            if (traceId.isEmpty())
+                traceId = QString::fromLatin1(reply->rawHeader("x-fb-trace-id"));
+            QString details = QString("Upload failed (HTTP %1)").arg(httpStatus);
+            if (graphCode) details += QString(", Graph code %1").arg(graphCode);
+            if (graphSubcode) details += QString(", subcode %1").arg(graphSubcode);
+            if (!graphType.isEmpty()) details += ", " + graphType;
+            details += ": " + reason.left(500);
+            if (!traceId.isEmpty()) details += "\nMeta trace ID: " + traceId.left(120);
+            if (httpStatus == 400 && (graphCode == 200 || reason.contains("permission", Qt::CaseInsensitive)))
+                details += "\nCheck that the credential is an Asset Upload Access Token with hosting permissions, not merely an App Access Token.";
+            status_->setText(details);
+            // Keep the dialog actionable after API failures: a modal warning can
+            // appear frozen, and the status label already contains all details.
+            progress_->setValue(0);
+        }
+        reply->deleteLater();
+    });
+}
+) { continue }
+            $target=$prefix+$name
+            if ($target -match '(^/|(^|/)\.\.(/|$)|^[A-Za-z]:)' -or $target -notmatch '^fb-instant-games/') {
+                throw "Unsafe ZIP entry: $name"
+            }
+            $new=$dst.CreateEntry($target,[System.IO.Compression.CompressionLevel]::Optimal)
+            $from=$entry.Open()
+            $to=$new.Open()
+            try { $from.CopyTo($to) } finally { $to.Dispose(); $from.Dispose() }
+        }
+    } finally { $dst.Dispose() }
+} finally { $src.Dispose() }
+)PS");
+    if (!runPowerShell(script, outputZip, error, inputZip)) return {};
+    return outputZip;
+}
+
+static QString packageDirectory(const QString& buildPath, const QString& tempPath, QString& error) {
+    const QDir build(buildPath);
+    if (!QFileInfo(build.filePath("index.html")).isFile() ||
+        !QFileInfo(build.filePath("fbapp-config.json")).isFile()) {
+        error = "Build folder must contain index.html and fbapp-config.json.";
+        return {};
+    }
+    const QString stage = QDir(tempPath).filePath("bundle/fb-instant-games");
+    QDir().mkpath(stage);
+    QDirIterator iterator(buildPath, QDir::Files | QDir::NoSymLinks | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
+    while (iterator.hasNext()) {
+        const QString source = iterator.next();
+        const QString relative = build.relativeFilePath(source).replace('\\', '/');
+        const QString name = QFileInfo(source).fileName().toLower();
+        if (name == "cert.pem" || name == "key.pem" || name.endsWith(".key") ||
+            name.endsWith(".zip") || relative.startsWith("../")) continue;
+        const QString target = QDir(stage).filePath(relative);
+        if (!QDir().mkpath(QFileInfo(target).absolutePath()) || !QFile::copy(source, target)) {
+            error = "Cannot stage: " + relative;
+            return {};
+        }
+    }
+    const QString zip = QDir(tempPath).filePath("bundle.zip");
+    const QString script = QString::fromLatin1(R"PS(
+$ErrorActionPreference='Stop'
+Compress-Archive -Path (Join-Path (Split-Path $env:FBIL_STAGE_PATH -Parent) '*') -DestinationPath $env:FBIL_ZIP_PATH -Force
 )PS");
     if (!runPowerShell(script, zip, error, stage)) {
         error = "ZIP creation failed: " + error;
