@@ -336,7 +336,7 @@ void MainWindow::playGame() {
         }
         const QString globalModules = QString::fromLocal8Bit(npm.readAllStandardOutput()).trimmed().split('\n').last().trimmed();
         const QString serverEntry = QDir(globalModules).filePath("http-server/bin/http-server");
-        if (!QFileInfo::isFile(serverEntry)) {
+        if (!QFileInfo(serverEntry).isFile()) {
             QMessageBox::warning(this, "Missing http-server", "Cannot find global http-server package. Run: npm install -g http-server");
             return;
         }
