@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(FBInstantLocalLauncher VERSION 1.2.4 LANGUAGES CXX)
+project(FBInstantLocalLauncher VERSION 1.2.5 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(LAUNCHER_GITHUB_REPO "" CACHE STRING "Public GitHub repo owner/name for update checks")
