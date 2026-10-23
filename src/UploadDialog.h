@@ -14,6 +14,8 @@ class UploadDialog : public QDialog {
     Q_OBJECT
 public:
     UploadDialog(const QString& gameName, const QString& appId, const QString& buildPath, QWidget* parent = nullptr);
+protected:
+    void reject() override;
 private:
     void chooseZip();
     void saveToken();
