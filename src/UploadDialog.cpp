@@ -419,7 +419,23 @@ void UploadDialog::uploadPreparedBundle(const QString& zip) {
         } else {
             QString reason = failure.value("message").toString();
             if (reason.isEmpty()) reason = reply->errorString();
-            status_->setText("Upload failed (HTTP " + QString::number(reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()) + "): " + reason.left(500));
+            const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const int graphCode = failure.value("code").toInt();
+            const int graphSubcode = failure.value("error_subcode").toInt();
+            const QString graphType = failure.value("type").toString();
+            QString traceId = failure.value("fbtrace_id").toString();
+            if (traceId.isEmpty())
+                traceId = QString::fromLatin1(reply->rawHeader("x-fb-trace-id"));
+            QString details = QString("Upload failed (HTTP %1)").arg(httpStatus);
+            if (graphCode) details += QString(", Graph code %1").arg(graphCode);
+            if (graphSubcode) details += QString(", subcode %1").arg(graphSubcode);
+            if (!graphType.isEmpty()) details += ", " + graphType;
+            details += ": " + reason.left(500);
+            if (!traceId.isEmpty()) details += "\\nMeta trace ID: " + traceId.left(120);
+            if (httpStatus == 400 && (graphCode == 200 || reason.contains("permission", Qt::CaseInsensitive)))
+                details += "\\nCheck that the credential is an Asset Upload Access Token with hosting permissions, not merely an App Access Token.";
+            status_->setText(details);
+            QMessageBox::warning(this, "Meta upload failed", details);
         }
         reply->deleteLater();
     });
