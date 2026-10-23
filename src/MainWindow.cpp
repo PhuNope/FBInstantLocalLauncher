@@ -93,6 +93,19 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), server_(new QProc
         UploadDialog dialog(g.value("name").toString(), g.value("id").toString(), g.value("path").toString(), this);
         dialog.exec();
     });
+    makeButton("Facebook Dashboard", [this] {
+        const int i = selectedIndex();
+        if (i < 0) {
+            QMessageBox::information(this, "Select a game", "Select a game to open its Facebook dashboard.");
+            return;
+        }
+        const QString appId = games_.at(i).toObject().value("id").toString();
+        if (!QRegularExpression("^[0-9]+$").match(appId).hasMatch()) {
+            QMessageBox::warning(this, "Invalid App ID", "Selected game has no valid numeric Facebook App ID.");
+            return;
+        }
+        QDesktopServices::openUrl(QUrl("https://developers.facebook.com/apps/" + appId + "/"));
+    });
     stopButton_ = makeButton("■ Stop server", [this]{ stopServer(); });
     makeButton("Open data folder", [this]{ openDataFile(); });
     makeButton("Dependencies", [this]{ showDependencies(); });
