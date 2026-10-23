@@ -120,7 +120,7 @@ UploadDialog::UploadDialog(const QString& gameName, const QString& appId, const 
     progress_->setRange(0, 100);
     progress_->setValue(0);
     layout->addWidget(progress_);
-    status_ = new QLabel("Ready. ZIP contains fb-instant-games/index.html and fb-instant-games/fbapp-config.json.");
+    status_ = new QLabel("Ready. Bundle will contain fb-instant-games/index.html and fb-instant-games/fbapp-config.json.");
     status_->setWordWrap(true);
     layout->addWidget(status_);
     auto* buttons = new QHBoxLayout;
